@@ -1,8 +1,22 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import { Worker } from "bullmq";
 import { generate } from "@pdfme/generator";
 import { merge } from "@pdfme/manipulator";
 import axios from "axios";
-import FormData from "form-data";
+import { FormData, Blob } from "formdata-node";
+import {
+  table,
+  image,
+  multiVariableText,
+  text,
+  rectangle,
+  line,
+} from "@pdfme/schemas";
+
+import { ReportData } from "./types/structure";
+import { ReportTemplate } from "./types/template";
 
 const STRAPI_URL = process.env.STRAPI_URL;
 const STRAPI_API_TOKEN = process.env.STRAPI_API_TOKEN;
@@ -11,6 +25,15 @@ const strapiApi = axios.create({
   baseURL: STRAPI_URL,
   headers: { Authorization: `Bearer ${STRAPI_API_TOKEN}` },
 });
+
+const pdfmePlugins = {
+  Image: image,
+  Table: table,
+  Text: text,
+  Rectangle: rectangle,
+  Line: line,
+  MultiVariableText: multiVariableText,
+};
 
 // Fetch S3 images and convert to base64
 async function urlToBase64(url: string): Promise<string> {
@@ -23,71 +46,139 @@ async function urlToBase64(url: string): Promise<string> {
 const worker = new Worker(
   "reports",
   async (job) => {
-    const { templates, dynamicOrderData, user } = job.data;
-
+    console.log("Received Job Request");
+    const { templateId, orderRefId, orderId, user } = job.data;
     const pdfBuffers: Buffer[] = [];
 
-    // Handle base64 image conversions
-    if (dynamicOrderData.summary?.logo?.url) {
-      dynamicOrderData.summary.logo = {
-        url: await urlToBase64(dynamicOrderData.summary.logo.url),
+    // Fetching compiled report data from the server
+    const reportDataResponse = await strapiApi.get(
+      `/api/bot/orders/${orderRefId}`,
+    );
+    const reportData = reportDataResponse?.data as ReportData;
+
+    // Fetching template JSONs
+    const templatesApiResponse = await strapiApi.get(
+      `/api/report-templates/${templateId}`,
+    );
+    const templates = templatesApiResponse.data as ReportTemplate;
+
+    // Handle base64 image conversions for summary logo
+    if (reportData.summary?.logo?.url) {
+      reportData.summary.logo = {
+        url: await urlToBase64(reportData.summary.logo.url),
       };
     }
-    if (dynamicOrderData.roofOutline?.image?.url) {
-      dynamicOrderData.roofOutline.image = {
-        url: await urlToBase64(dynamicOrderData.roofOutline.image.url),
-      };
-    }
-    if (dynamicOrderData.images?.data?.length) {
-      const base64Images = await Promise.all(
-        dynamicOrderData.images.data.map((u: string) => urlToBase64(u))
-      );
-      dynamicOrderData.images.data = base64Images;
-    }
 
-    // Generate PDFs
-    for (const [key, templateJSON] of Object.entries(templates)) {
-      if (!templateJSON) continue;
-      const data = dynamicOrderData[key];
-      if (!data) continue;
+    // Handle base64 image conversions for each structure
+    if (reportData.structures?.length) {
+      for (const structure of reportData.structures) {
+        if (structure.structure_image?.url) {
+          structure.structure_image = {
+            url: await urlToBase64(structure.structure_image.url),
+          };
+        }
+        if (structure.roof_outline_image?.url) {
+          structure.roof_outline_image = {
+            url: await urlToBase64(structure.roof_outline_image.url),
+          };
+        }
+        if (structure.images?.length) {
+          const base64Images = await Promise.all(
+            structure.images.map((u: string) => urlToBase64(u)),
+          );
+          structure.images = base64Images;
+        }
 
-      const pdf = await generate({
-        template: templateJSON,
-        inputs: [data],
-      });
+        // Generate Summary PDF
+        const summaryPdf = await generate({
+          // @ts-ignore
+          template: templates.summaryTemplate,
+          inputs: [
+            {
+              ...reportData.summary,
+              ...structure,
+              logo: reportData.summary.logo.url,
+              structure_image: structure.structure_image.url,
+            },
+          ],
+          plugins: pdfmePlugins,
+        });
 
-      pdfBuffers.push(Buffer.from(pdf));
+        // Generate Roof Outline PDF
+        const roofOutlinePdf = await generate({
+          // @ts-ignore
+          template: templates.roofOutlineTemplate,
+          inputs: [
+            {
+              structure_count: 0,
+              remarks: structure?.notes,
+              address: reportData.summary.address,
+              logo: reportData.summary.logo.url,
+              roof_outline_image: structure.roof_outline_image.url,
+            },
+          ],
+          plugins: pdfmePlugins,
+        });
+
+        // Generate Annotations PDF
+        const tableData = structure.annotations_table_data || [];
+        const midpoint = Math.ceil(tableData.length / 2);
+
+        const annotationsPdf = await generate({
+          // @ts-ignore
+          template: templates.annotationsTemplate,
+          inputs: [
+            {
+              structure_count: 0,
+              address: reportData.summary.address,
+              logo: reportData.summary.logo.url,
+              roof_outline_image: structure.roof_outline_image.url,
+              annotations_table_data_1: tableData.slice(0, midpoint),
+              annotations_table_data_2: tableData.slice(midpoint),
+            },
+          ],
+          plugins: pdfmePlugins,
+        });
+
+        pdfBuffers.push(Buffer.from(summaryPdf));
+        pdfBuffers.push(Buffer.from(roofOutlinePdf));
+        pdfBuffers.push(Buffer.from(annotationsPdf));
+      }
     }
 
     // Merge all PDFs
     const mergedPdf = await merge(pdfBuffers);
+    
 
     // Upload to Strapi Upload plugin
-    const fileName = `report-${user.id}-${Date.now()}.pdf`;
+    const fileName = `OD-${orderId}.pdf`;
     const formData = new FormData();
+
+    formData.append("ref", "api::order.order");
+    formData.append("refId", orderId);
+    formData.append("field", "outputs");
+
     formData.append(
       "files",
       new Blob([mergedPdf], { type: "application/pdf" }),
-      fileName
+      fileName,
     );
 
-    const uploadRes = await strapiApi.post("/upload", formData, {
-      headers: formData.getHeaders(),
+    const uploadRes = await strapiApi.post("/api/upload", formData, {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
     });
 
     const uploadedFile = uploadRes.data[0];
 
-    // Save reference in report-file collection
-    await strapiApi.post("/api/report-files", {
-      data: { user: user.id, file: uploadedFile.id },
+    
+    // Update order status
+    await strapiApi.put(`/api/bot/orders/${orderId}`, {
+      status: "completed",
+      internalStatus: "completed",
     });
-
-    // Email user
-    await strapiApi.post("/api/email", {
-      to: user.email,
-      subject: "Your report is ready",
-      text: `Download it here: ${uploadedFile.url}`,
-    });
+    
 
     return uploadedFile.url;
   },
@@ -96,12 +187,13 @@ const worker = new Worker(
       host: process.env.DRAGONFLY_HOST || "dragonfly",
       port: Number(process.env.DRAGONFLY_PORT) || 6379,
     },
-  }
+    concurrency: 10,
+  },
 );
 
 worker.on("completed", (job) =>
-  console.log(`✅ Report job ${job.id} completed`)
+  console.log(`✅ Report job ${job.id} completed`),
 );
 worker.on("failed", (job, err) =>
-  console.error(`❌ Job ${job?.id} failed:`, err)
+  console.error(`❌ Job ${job?.id} failed:`, err),
 );

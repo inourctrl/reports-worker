@@ -1,10 +1,23 @@
 {
+  "scripts": {
+    "start": "ts-node index.ts",
+    "dev": "ts-node --watch index.ts",
+    "start:local": "DRAGONFLY_HOST=localhost DRAGONFLY_PORT=6379 ts-node index.ts"
+  },
   "dependencies": {
+    "@pdfme/common": "^5.4.5",
     "@pdfme/generator": "^5.4.5",
     "@pdfme/manipulator": "^5.4.5",
+    "@pdfme/schemas": "^5.4.6",
     "@types/node": "^24.3.1",
     "axios": "^1.11.0",
     "bullmq": "^5.58.5",
-    "form-data": "^4.0.4"
+    "dotenv": "^17.2.2",
+    "form-data": "^4.0.4",
+    "formdata-node": "^6.0.3"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
   }
 }
