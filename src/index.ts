@@ -43,11 +43,51 @@ async function urlToBase64(url: string): Promise<string> {
   return `data:${mime};base64,${b64}`;
 }
 
+// Update multiple fields in the static schema of templateJson
+export function updateStaticFieldsInTemplate<T = any>(
+  template: T,
+  updates: Record<string, any>,
+): T {
+  // Deep clone the template to avoid mutations
+  const templateCopy = JSON.parse(JSON.stringify(template));
+
+  // Check if basePdf and staticSchema exist
+  if (
+    !templateCopy.basePdf ||
+    !Array.isArray(templateCopy.basePdf.staticSchema)
+  ) {
+    console.warn("Template does not have basePdf.staticSchema");
+    return templateCopy;
+  }
+
+  // Update all fields
+  Object.entries(updates).forEach(([fieldName, value]) => {
+    const field = templateCopy.basePdf.staticSchema.find(
+      (f: any) => f.name === fieldName,
+    );
+
+    if (field) {
+      field.content = value;
+    } else {
+      console.warn(`Field "${fieldName}" not found in staticSchema`);
+    }
+  });
+
+  return templateCopy;
+}
+
 const worker = new Worker(
   "reports",
   async (job) => {
     console.log("Received Job Request");
-    const { templateId, orderRefId, orderId, user } = job.data;
+    let count = 0;
+    const {
+      templateId,
+      orderRefId,
+      orderId,
+      suppressClientNotification,
+      user,
+    } = job.data;
     const pdfBuffers: Buffer[] = [];
 
     // Fetching compiled report data from the server
@@ -69,6 +109,9 @@ const worker = new Worker(
       };
     }
 
+    console.log("Received reportData");
+    console.log(reportData);
+
     // Handle base64 image conversions for each structure
     if (reportData.structures?.length) {
       for (const structure of reportData.structures) {
@@ -89,7 +132,9 @@ const worker = new Worker(
           structure.images = base64Images;
         }
 
-        // Generate Summary PDF
+        count += 1;
+
+        // Generate Summary PDF (1st page)
         const summaryPdf = await generate({
           // @ts-ignore
           template: templates.summaryTemplate,
@@ -104,13 +149,15 @@ const worker = new Worker(
           plugins: pdfmePlugins,
         });
 
+        console.log("Summary PDF generated successfully");
+
         // Generate Roof Outline PDF
         const roofOutlinePdf = await generate({
           // @ts-ignore
           template: templates.roofOutlineTemplate,
           inputs: [
             {
-              structure_count: 0,
+              structure_count: count.toString(),
               remarks: structure?.notes,
               address: reportData.summary.address,
               logo: reportData.summary.logo.url,
@@ -119,26 +166,34 @@ const worker = new Worker(
           ],
           plugins: pdfmePlugins,
         });
+        console.log("roofOutline PDF generated successfully");
 
         // Generate Annotations PDF
         const tableData = structure.annotations_table_data || [];
         const midpoint = Math.ceil(tableData.length / 2);
 
+        const annotationsTemplate = updateStaticFieldsInTemplate(
+          templates.annotationsTemplate,
+          {
+            structure_count: `${count}`,
+            address: reportData.summary.address,
+            logo: reportData.summary.logo.url,
+          },
+        );
+
         const annotationsPdf = await generate({
           // @ts-ignore
-          template: templates.annotationsTemplate,
+          template: annotationsTemplate,
           inputs: [
             {
-              structure_count: 0,
-              address: reportData.summary.address,
-              logo: reportData.summary.logo.url,
-              roof_outline_image: structure.roof_outline_image.url,
               annotations_table_data_1: tableData.slice(0, midpoint),
               annotations_table_data_2: tableData.slice(midpoint),
             },
           ],
           plugins: pdfmePlugins,
         });
+
+        console.log("annotations PDF generated successfully");
 
         pdfBuffers.push(Buffer.from(summaryPdf));
         pdfBuffers.push(Buffer.from(roofOutlinePdf));
@@ -148,7 +203,8 @@ const worker = new Worker(
 
     // Merge all PDFs
     const mergedPdf = await merge(pdfBuffers);
-    
+
+    console.log("PDFs merged successfully");
 
     // Upload to Strapi Upload plugin
     const fileName = `OD-${orderId}.pdf`;
@@ -172,13 +228,12 @@ const worker = new Worker(
 
     const uploadedFile = uploadRes.data[0];
 
-    
     // Update order status
     await strapiApi.put(`/api/bot/orders/${orderId}`, {
-      status: "completed",
+      // If suppressClientNotification = true, don't mark the order as completed
+      ...(!suppressClientNotification && { status: "completed" }),
       internalStatus: "completed",
     });
-    
 
     return uploadedFile.url;
   },
