@@ -241,6 +241,7 @@ const worker = new Worker(
     connection: {
       host: process.env.DRAGONFLY_HOST || "dragonfly",
       port: Number(process.env.DRAGONFLY_PORT) || 6379,
+      password: process.env.DRAGONFLY_PASSWORD,
     },
     concurrency: 10,
   },
