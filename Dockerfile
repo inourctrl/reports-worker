@@ -12,6 +12,7 @@ RUN apk add --no-cache \
     freetype-dev \
     python3 \
     make \
+    bash \
     g++
 
 WORKDIR /app
