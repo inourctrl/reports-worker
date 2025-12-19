@@ -92,7 +92,7 @@ const worker = new Worker(
 
     // Fetching compiled report data from the server
     const reportDataResponse = await strapiApi.get(
-      `/api/bot/orders/${orderRefId}`,
+      `/api/bot/order-structures/${orderRefId}`,
     );
     const reportData = reportDataResponse?.data as ReportData;
 
