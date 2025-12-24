@@ -86,7 +86,6 @@ const worker = new Worker(
       orderRefId,
       orderId,
       suppressClientNotification,
-      user,
     } = job.data;
     const pdfBuffers: Buffer[] = [];
 
@@ -229,9 +228,10 @@ const worker = new Worker(
     const uploadedFile = uploadRes.data[0];
 
     // Update order status
+    if(!suppressClientNotification)
     await strapiApi.put(`/api/bot/orders/${orderId}`, {
       // If suppressClientNotification = true, don't mark the order as completed
-      ...(!suppressClientNotification && { status: "completed" }),
+      status: "completed",
       internalStatus: "completed",
     });
 
