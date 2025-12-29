@@ -17,14 +17,7 @@ import {
 
 import { ReportData } from "./types/structure";
 import { ReportTemplate } from "./types/template";
-
-const STRAPI_URL = process.env.STRAPI_URL;
-const STRAPI_API_TOKEN = process.env.STRAPI_API_TOKEN;
-
-const strapiApi = axios.create({
-  baseURL: STRAPI_URL,
-  headers: { Authorization: `Bearer ${STRAPI_API_TOKEN}` },
-});
+import { apiConfig } from "./config";
 
 const pdfmePlugins = {
   Image: image,
@@ -86,8 +79,29 @@ const worker = new Worker(
       orderRefId,
       orderId,
       suppressClientNotification,
+      referrer,
     } = job.data;
     const pdfBuffers: Buffer[] = [];
+
+    // API CONFIGS
+    let STRAPI_URL;
+    let STRAPI_API_TOKEN;
+
+    switch (referrer) {
+      case "roofingcad":
+        STRAPI_URL = apiConfig["roofingcad"].apiBaseUrl;
+        STRAPI_API_TOKEN = apiConfig["roofingcad"].apiToken;
+        break;
+      case "4hrsreport":
+        STRAPI_URL = apiConfig["4hrsreport"].apiBaseUrl;
+        STRAPI_API_TOKEN = apiConfig["4hrsreport"].apiToken;
+        break;
+    }
+
+    const strapiApi = axios.create({
+      baseURL: STRAPI_URL,
+      headers: { Authorization: `Bearer ${STRAPI_API_TOKEN}` },
+    });
 
     // Fetching compiled report data from the server
     const reportDataResponse = await strapiApi.get(
@@ -133,6 +147,25 @@ const worker = new Worker(
 
         count += 1;
 
+        // Update static schema in applicable templates
+        const annotationsTemplate = updateStaticFieldsInTemplate(
+          templates.annotationsTemplate,
+          {
+            structure_count: `${count}`,
+            address: reportData.summary.address,
+            logo: reportData.summary.logo.url,
+          },
+        );
+
+        const imagesTemplate = updateStaticFieldsInTemplate(
+          templates.imagesTemplate,
+          {
+            structure_count: `${count}`,
+            address: reportData.summary.address,
+            logo: reportData.summary.logo.url,
+          },
+        );
+
         // Generate Summary PDF (1st page)
         const summaryPdf = await generate({
           // @ts-ignore
@@ -171,15 +204,6 @@ const worker = new Worker(
         const tableData = structure.annotations_table_data || [];
         const midpoint = Math.ceil(tableData.length / 2);
 
-        const annotationsTemplate = updateStaticFieldsInTemplate(
-          templates.annotationsTemplate,
-          {
-            structure_count: `${count}`,
-            address: reportData.summary.address,
-            logo: reportData.summary.logo.url,
-          },
-        );
-
         const annotationsPdf = await generate({
           // @ts-ignore
           template: annotationsTemplate,
@@ -194,9 +218,23 @@ const worker = new Worker(
 
         console.log("annotations PDF generated successfully");
 
+        // Generate Images PDF
+        const images: Record<string, string> = {};
+
+        for (const [index, i] of (structure?.images ?? []).entries()) {
+          images[`img_${index}`] = await urlToBase64(i);
+        }
+
+        const imagesPdf = await generate({
+          // @ts-ignore
+          template: imagesTemplate,
+          inputs: [images],
+        });
+
         pdfBuffers.push(Buffer.from(summaryPdf));
         pdfBuffers.push(Buffer.from(roofOutlinePdf));
         pdfBuffers.push(Buffer.from(annotationsPdf));
+        pdfBuffers.push(Buffer.from(imagesPdf));
       }
     }
 
@@ -228,12 +266,12 @@ const worker = new Worker(
     const uploadedFile = uploadRes.data[0];
 
     // Update order status
-    if(!suppressClientNotification)
-    await strapiApi.put(`/api/bot/orders/${orderId}`, {
-      // If suppressClientNotification = true, don't mark the order as completed
-      status: "completed",
-      internalStatus: "completed",
-    });
+    if (!suppressClientNotification)
+      await strapiApi.put(`/api/bot/orders/${orderId}`, {
+        // If suppressClientNotification = true, don't mark the order as completed
+        status: "completed",
+        internalStatus: "completed",
+      });
 
     return uploadedFile.url;
   },

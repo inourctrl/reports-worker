@@ -1,3 +1,4 @@
+
 export interface ReportTemplate {
   name: string,
   summaryTemplate: JSON,
